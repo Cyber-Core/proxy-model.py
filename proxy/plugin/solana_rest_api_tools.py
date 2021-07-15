@@ -1,30 +1,31 @@
-from solana.transaction import AccountMeta, TransactionInstruction, Transaction
-from solana.sysvar import *
-from solana.blockhash import Blockhash
-import time
-import subprocess
-import os
 import base64
-from base58 import b58encode, b58decode
-from eth_keys import keys as eth_keys
-from typing import NamedTuple
-import random
 import json
-from sha3 import keccak_256
-import struct
-import rlp
-from .eth_proto import Trx
-from solana.rpc.types import TxOpts
-import re
-from solana.rpc.commitment import Commitment, Confirmed
-from solana.rpc.api import SendTransactionError
-
-from construct import Bytes, Int8ul, Int32ul, Int64ul, Struct as cStruct
-from solana._layouts.system_instructions import SYSTEM_INSTRUCTIONS_LAYOUT, InstructionType as SystemInstructionType
-from hashlib import sha256
-#from eth_keys import keys
-from web3.auto import w3
 import logging
+import os
+import random
+import re
+import struct
+import subprocess
+import time
+from hashlib import sha256
+from typing import NamedTuple
+
+import rlp
+from base58 import b58encode, b58decode
+from construct import Bytes, Int8ul, Int64ul, Struct as cStruct
+from eth_keys import keys as eth_keys
+from sha3 import keccak_256
+from solana._layouts.system_instructions import SYSTEM_INSTRUCTIONS_LAYOUT, InstructionType as SystemInstructionType
+from solana.blockhash import Blockhash
+from solana.rpc.api import SendTransactionError
+from solana.rpc.commitment import Confirmed
+from solana.rpc.types import TxOpts
+from solana.sysvar import *
+from solana.transaction import AccountMeta, TransactionInstruction, Transaction
+# from eth_keys import keys
+from web3.auto import w3
+
+from .eth_proto import Trx
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -505,7 +506,7 @@ def simulate_continue(acc, client, accounts, step_count):
     logger.debug("tx_count = {}, step_count = {}".format(continue_count, step_count))
     return (continue_count, step_count)
 
-def create_account_list_by_emulate(acc, client, ethTrx, storage):
+def create_account_list_by_emulate(acc, client, ethTrx):
     sender_ether = bytes.fromhex(ethTrx.sender())
     add_keys_05 = []
     trx = Transaction()
@@ -535,11 +536,9 @@ def create_account_list_by_emulate(acc, client, ethTrx, storage):
             trx.add(createEtherAccountTrx(client, address, evm_loader_id, acc, code_account)[0])
 
     accounts = [
-            AccountMeta(pubkey=storage, is_signer=False, is_writable=True),
             AccountMeta(pubkey=contract_sol, is_signer=False, is_writable=True),
             AccountMeta(pubkey=code_sol, is_signer=False, is_writable=True),
             AccountMeta(pubkey=sender_sol, is_signer=False, is_writable=True),
-            AccountMeta(pubkey=PublicKey(sysinstruct), is_signer=False, is_writable=False),
             AccountMeta(pubkey=evm_loader_id, is_signer=False, is_writable=False),
         ] + add_keys_05 + [
             AccountMeta(pubkey=PublicKey(sysvarclock), is_signer=False, is_writable=False),
@@ -547,14 +546,14 @@ def create_account_list_by_emulate(acc, client, ethTrx, storage):
     return (accounts, sender_ether, sender_sol, trx)
 
 def call_signed(acc, client, ethTrx, storage, steps):
-    (accounts, sender_ether, sender_sol, create_acc_trx) = create_account_list_by_emulate(acc, client, ethTrx, storage)
+    (accounts, sender_ether, sender_sol, create_acc_trx) = create_account_list_by_emulate(acc, client, ethTrx)
     msg = sender_ether + ethTrx.signature() + ethTrx.unsigned_msg()
 
     call_from_holder = False
     call_iterative = False
     try:
         logger.debug("Try single trx call")
-        return call_signed_noniterative(acc, client, ethTrx, msg, accounts[1:], create_acc_trx, sender_sol)
+        return call_signed_noniterative(acc, client, ethTrx, msg, accounts, create_acc_trx, sender_sol)
     except Exception as err:
         logger.debug(str(err))
         if str(err).find("Program failed to complete") >= 0:
@@ -598,8 +597,33 @@ def call_signed_noniterative(acc, client, ethTrx, msg, accounts, create_acc_trx,
         keys=[
             AccountMeta(pubkey=PublicKey(sender_sol), is_signer=False, is_writable=False),
         ]))
-    call_txs_05.add(make_05_call_instruction(accounts, msg))
 
+    # Generated with
+    # solana create-address-with-seed collateral_seed_* 67REEvFbE25SwzocC5dgJd2BAp8nFLxwukiWHntAv5FX
+    collateral_pool = ["6fNXSnZ6y13kLkcPCfwnNc1wF7ydr7mH3HSkagX1HM3B",
+                       "5xhpDagjtuTa28iEzv5MEhghrY5amHfBD845qthSUu2N",
+                       "BmweRNmqMUVBQE8onugArJNmHwcBzSeL8h4vwGjrce77",
+                       "5xjiiVt3phheix6LKQjShuSFcWMbdCRKBo8wBbQER85k",
+                       "8z6m8R5jhrV4RaGxJXZiBxF4USFkQAm6qDWGkoBhrfnz"]
+    collateral_pool_seed_index = random.randint(0, 4)
+
+    # Insert additional accounts for EvmInstruction::CallFromRawEthereumTX in reverse order:
+    # system program account
+    accounts.insert(0, AccountMeta(pubkey=PublicKey(system), is_signer=False, is_writable=False))
+    # operator ETH address
+    accounts.insert(0, AccountMeta(pubkey=PublicKey("SysvarC1ock11111111111111111111111111111111"), is_signer=False, is_writable=True))
+    # user ETH address
+    accounts.insert(0, AccountMeta(pubkey=PublicKey("SysvarC1ock11111111111111111111111111111111"), is_signer=False, is_writable=True))
+    # collateral pool address (SOL)
+    accounts.insert(0, AccountMeta(pubkey=PublicKey(collateral_pool[collateral_pool_seed_index]), is_signer=False, is_writable=True))
+    # operator address (SOL)
+    accounts.insert(0, AccountMeta(pubkey=acc.public_key(), is_signer=True, is_writable=True))
+    # system instructions
+    accounts.insert(0, AccountMeta(pubkey=PublicKey(sysinstruct), is_signer=False, is_writable=False))
+    # Append pool index to the instruction data
+    msg = msg + bytearray([collateral_pool_seed_index])
+
+    call_txs_05.add(make_05_call_instruction(accounts, msg))
     result = send_measured_transaction(client, call_txs_05, acc)
     return result['result']['transaction']['signatures'][0]
 
